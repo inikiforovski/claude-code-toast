@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "toast-notifications",
-      "source": ".",
+      "source": "./",
       "description": "Windows toast notifications for Claude Code events using BurntToast",
       "version": "1.0.0",
       "author": {
