@@ -1,0 +1,9 @@
+{
+  "name": "claude-code-toast",
+  "description": "Windows toast notifications for Claude Code events using BurntToast",
+  "version": "1.0.0",
+  "author": {
+    "name": "TianqiZhang"
+  },
+  "hooks": "./hooks/hooks.json"
+}

@@ -1,0 +1,23 @@
+{
+  "name": "claude-code-toast",
+  "owner": {
+    "name": "TianqiZhang"
+  },
+  "metadata": {
+    "description": "Windows toast notifications for Claude Code",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "toast-notifications",
+      "source": ".",
+      "description": "Windows toast notifications for Claude Code events using BurntToast",
+      "version": "1.0.0",
+      "author": {
+        "name": "TianqiZhang"
+      },
+      "license": "MIT",
+      "keywords": ["windows", "toast", "notifications", "burnttoast", "hooks"]
+    }
+  ]
+}
