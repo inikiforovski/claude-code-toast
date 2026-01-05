@@ -1,6 +1,6 @@
 # claude-code-toast
 
-Windows toast notifications for [Claude Code](https://claude.ai/code) events using [BurntToast](https://github.com/Windos/BurntToast).
+Windows toast notifications for [Claude Code](https://claude.ai/code) events using native Windows APIs.
 
 ## Features
 
@@ -11,13 +11,8 @@ Windows toast notifications for [Claude Code](https://claude.ai/code) events usi
 
 - Windows 10/11
 - PowerShell 5.1+
-- [BurntToast](https://github.com/Windos/BurntToast) PowerShell module
 
-Install BurntToast:
-
-```powershell
-Install-Module -Name BurntToast -Scope CurrentUser
-```
+No external modules required - uses native Windows toast notification APIs.
 
 ## Installation
 
