@@ -39,7 +39,7 @@ Then install the plugin:
 ### Option 3: Local Installation (for development)
 
 ```bash
-/plugin marketplace add F:\claude\claude-code-toast
+/plugin marketplace add /path/to/claude-code-toast
 /plugin install toast-notifications@claude-code-toast
 ```
 
@@ -62,10 +62,12 @@ Once installed, the plugin automatically:
 ```
 claude-code-toast/
 ├── .claude-plugin/
-│   ├── plugin.json         # Plugin manifest
-│   └── marketplace.json    # Marketplace manifest
+│   ├── plugin.json             # Plugin manifest
+│   └── marketplace.json        # Marketplace manifest
+├── assets/
+│   └── icon.png                # Notification icon
 ├── hooks/
-│   └── hooks.json          # Hook configuration
+│   └── hooks.json              # Hook configuration
 ├── scripts/
 │   ├── toast-notification.ps1  # Notification handler
 │   └── toast-stop.ps1          # Stop event handler
@@ -73,9 +75,15 @@ claude-code-toast/
 └── README.md
 ```
 
-## For Marketplace Maintainers
+## Testing
 
-This repo serves as both a plugin and a marketplace. To add more plugins in the future, edit `.claude-plugin/marketplace.json`.
+```powershell
+# Test notification toast
+'{"message": "Test notification", "notification_type": "info"}' | powershell -File .\scripts\toast-notification.ps1
+
+# Test stop toast
+powershell -File .\scripts\toast-stop.ps1
+```
 
 ## License
 
