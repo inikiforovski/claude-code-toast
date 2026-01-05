@@ -26,7 +26,7 @@ Install-Module -Name BurntToast -Scope CurrentUser
 First, add the marketplace:
 
 ```bash
-/plugin marketplace add YOUR_USERNAME/claude-code-toast
+/plugin marketplace add TianqiZhang/claude-code-toast
 ```
 
 Then install the plugin:
@@ -38,7 +38,7 @@ Then install the plugin:
 ### Option 2: Direct Plugin Install
 
 ```bash
-/plugin install YOUR_USERNAME/claude-code-toast
+/plugin install TianqiZhang/claude-code-toast
 ```
 
 ### Option 3: Local Installation (for development)
