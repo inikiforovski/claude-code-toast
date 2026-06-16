@@ -119,10 +119,22 @@ if ($target) {
 }
 
 if ($matchedTab) {
-  try {
-    $matchedTab.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
-  } catch {}
+  # Raise the window BEFORE selecting the tab. SelectionItemPattern.Select() is
+  # unreliable against a minimized Terminal: the tab strip isn't realized so the call
+  # silently no-ops, and un-minimizing re-activates whatever tab was last shown. So
+  # restore/foreground first, then select -- retrying until the tab reports selected,
+  # because the window may still be animating out of the minimized state.
   [WinFocus]::Force($matchedHwnd)
+  try {
+    $sel = $matchedTab.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+    for ($i = 0; $i -lt 20; $i++) {
+      try {
+        $sel.Select()
+        if ($sel.Current.IsSelected) { break }
+      } catch {}
+      Start-Sleep -Milliseconds 25
+    }
+  } catch {}
   exit 0
 }
 
