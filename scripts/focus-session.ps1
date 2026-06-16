@@ -49,6 +49,16 @@ public static class WinFocus {
     if (attached) AttachThreadInput(thisThread, fgThread, false);
   }
 
+  // Un-minimize without stealing focus/Z-order. Needed before reading a Terminal's
+  // tabs: while minimized, Windows Terminal does not realize its XAML tab strip, so
+  // UI Automation finds zero TabItems and tab matching silently fails.
+  public static void Restore(IntPtr hWnd) {
+    if (hWnd == IntPtr.Zero) return;
+    if (IsIconic(hWnd)) ShowWindow(hWnd, SW_RESTORE);
+  }
+
+  public static bool Iconic(IntPtr hWnd) { return IsIconic(hWnd); }
+
   public static List<IntPtr> ByClass(string cls) {
     var list = new List<IntPtr>();
     EnumWindows((h, l) => {
@@ -92,41 +102,85 @@ function Normalize-Title {
   return $t.Trim().ToLowerInvariant()
 }
 
-# --- Resolve the target window/tab via UI Automation ---
-$target = Normalize-Title (Get-TargetTitle $Uri)
-
-$matchedHwnd = [IntPtr]::Zero
-$matchedTab  = $null
-if ($target) {
-  try {
-    Add-Type -AssemblyName UIAutomationClient
-    Add-Type -AssemblyName UIAutomationTypes
-    $AE = [System.Windows.Automation.AutomationElement]
-    $winCond = New-Object System.Windows.Automation.PropertyCondition($AE::ClassNameProperty, $WT_CLASS)
-    $wins = $AE::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children, $winCond)
-    $tabCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::TabItem)
-    foreach ($w in $wins) {
-      foreach ($tb in $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $tabCond)) {
-        if ((Normalize-Title $tb.Current.Name) -eq $target) {
-          $matchedHwnd = [IntPtr]$w.Current.NativeWindowHandle
-          $matchedTab  = $tb
-          break
-        }
-      }
-      if ($matchedTab) { break }
-    }
-  } catch {}
+# --- Optional diagnostics ---------------------------------------------------
+# Logging is opt-in: create an empty file named 'debug' in the stable dir
+#   %LOCALAPPDATA%\claude-code-toast\debug
+# to capture what the handler sees on each click (window list, tab names, the
+# code path taken). Off by default so released installs stay silent.
+$LogPath = $null
+try {
+  $dbgDir  = Join-Path $env:LOCALAPPDATA 'claude-code-toast'
+  if (Test-Path (Join-Path $dbgDir 'debug')) { $LogPath = Join-Path $dbgDir 'focus-session.log' }
+} catch {}
+function Log {
+  param([string]$Msg)
+  if (-not $LogPath) { return }
+  try { Add-Content -Path $LogPath -Value ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss.fff'), $Msg) -Encoding UTF8 } catch {}
 }
 
-if ($matchedTab) {
-  # Raise the window BEFORE selecting the tab. SelectionItemPattern.Select() is
-  # unreliable against a minimized Terminal: the tab strip isn't realized so the call
-  # silently no-ops, and un-minimizing re-activates whatever tab was last shown. So
-  # restore/foreground first, then select -- retrying until the tab reports selected,
-  # because the window may still be animating out of the minimized state.
-  [WinFocus]::Force($matchedHwnd)
+# --- Resolve the target window/tab via UI Automation -------------------------
+$target = Normalize-Title (Get-TargetTitle $Uri)
+Log "--- click: uri='$Uri' target='$target' ---"
+
+$uiaReady = $false
+try {
+  Add-Type -AssemblyName UIAutomationClient
+  Add-Type -AssemblyName UIAutomationTypes
+  $uiaReady = $true
+} catch { Log "UIA load failed: $_" }
+
+function Find-MatchingTab {
+  # Returns a hashtable @{ Hwnd; Tab } for the first TabItem whose normalized name
+  # equals $target, or $null. Re-queries UIA fresh each call so it can be retried
+  # after a window is restored (its tab strip only realizes once un-minimized).
+  param([string]$target)
+  if (-not $uiaReady -or -not $target) { return $null }
+  $AE = [System.Windows.Automation.AutomationElement]
+  $winCond = New-Object System.Windows.Automation.PropertyCondition($AE::ClassNameProperty, $WT_CLASS)
+  $wins = $AE::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children, $winCond)
+  $tabCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::TabItem)
+  foreach ($w in $wins) {
+    $h = [IntPtr]$w.Current.NativeWindowHandle
+    $names = @()
+    $found = $null
+    foreach ($tb in $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $tabCond)) {
+      $n = Normalize-Title $tb.Current.Name
+      $names += $n
+      if (-not $found -and $n -eq $target) { $found = $tb }
+    }
+    Log ("  win {0} iconic={1} tabs=[{2}]" -f $h, ([WinFocus]::Iconic($h)), ($names -join ' | '))
+    if ($found) { return @{ Hwnd = $h; Tab = $found } }
+  }
+  return $null
+}
+
+$match = $null
+if ($target) { try { $match = Find-MatchingTab $target } catch { Log "search 1 error: $_" } }
+
+# Miss on the first pass is usually a minimized Terminal whose tab strip hasn't been
+# realized. Un-minimize every Terminal window, then retry the search a few times to
+# let XAML build the tab elements.
+if (-not $match -and $target) {
+  $wts = [WinFocus]::ByClass($WT_CLASS)
+  $restored = $false
+  foreach ($h in $wts) { if ([WinFocus]::Iconic($h)) { [WinFocus]::Restore($h); $restored = $true } }
+  Log "first pass miss; restored minimized windows=$restored count=$($wts.Count)"
+  if ($restored) {
+    for ($i = 0; $i -lt 10 -and -not $match; $i++) {
+      Start-Sleep -Milliseconds 100
+      try { $match = Find-MatchingTab $target } catch { Log "search 2 error: $_" }
+    }
+  }
+}
+
+if ($match) {
+  # Raise the window first, THEN select the tab. SelectionItemPattern.Select() is
+  # unreliable while the window is still animating out of the minimized state, so
+  # retry until the tab reports selected.
+  Log "matched hwnd=$($match.Hwnd) -> force + select"
+  [WinFocus]::Force($match.Hwnd)
   try {
-    $sel = $matchedTab.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+    $sel = $match.Tab.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
     for ($i = 0; $i -lt 20; $i++) {
       try {
         $sel.Select()
@@ -134,12 +188,13 @@ if ($matchedTab) {
       } catch {}
       Start-Sleep -Milliseconds 25
     }
-  } catch {}
+  } catch { Log "select error: $_" }
   exit 0
 }
 
 # Fallback: no tab matched (renamed tab, topic changed, etc.) -- raise a Terminal
 # window. EnumWindows returns top-of-Z-order first, i.e. the most recently active.
+Log "no match -> fallback raise top window"
 $wt = [WinFocus]::ByClass($WT_CLASS)
 if ($wt.Count -gt 0) { [WinFocus]::Force($wt[0]) }
 exit 0
