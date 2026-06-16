@@ -10,6 +10,11 @@ try {
   exit 0
 }
 
+# Notification types to suppress (no toast shown). `idle_prompt` fires when Claude
+# has been waiting for input for a while — not useful for tracking when to refocus.
+$suppressedTypes = @('idle_prompt')
+if ($data.notification_type -and $suppressedTypes -contains $data.notification_type) { exit 0 }
+
 # Claude Code Notification input includes `message` and usually `notification_type`
 # https://code.claude.com/docs/en/hooks (Notification Input)
 $title = "Claude Code"
