@@ -22,6 +22,17 @@ function ConvertTo-Base64Url {
   return ([Convert]::ToBase64String($b)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 }
 
+function Write-CaptureLog {
+  # Opt-in hook-side diagnostics: only writes when %LOCALAPPDATA%\claude-code-toast\debug
+  # exists (same marker the click handler uses). Off by default for released installs.
+  param([string]$Msg)
+  try {
+    if (-not (Test-Path (Join-Path $script:ToastStableDir 'debug'))) { return }
+    $log = Join-Path $script:ToastStableDir 'hook-capture.log'
+    Add-Content -Path $log -Value ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss.fff'), $Msg) -Encoding UTF8
+  } catch {}
+}
+
 function Get-OriginatingTabTitle {
   # Return THIS session's Windows Terminal tab title (Claude's topic) even when the tab
   # is inactive or the window is minimized.
@@ -95,10 +106,14 @@ function Get-SessionLaunchUri {
   # Build a protocol-activation URI carrying the originating tab title (Claude's topic)
   # so the click handler can switch to the exact tab. Falls back to [Console]::Title,
   # then to a bare focus verb (raise a Terminal window) when no title is available.
-  $title = Get-OriginatingTabTitle
+  $consoleBefore = ''
+  try { $consoleBefore = [Console]::Title } catch {}
+  $captured = Get-OriginatingTabTitle
+  $title = $captured
   if ([string]::IsNullOrEmpty($title)) {
     try { $title = [Console]::Title } catch { $title = '' }
   }
+  Write-CaptureLog ("launch: consoleBefore='{0}' captured='{1}' final='{2}'" -f $consoleBefore, $captured, $title)
   $enc = ConvertTo-Base64Url $title
   if ([string]::IsNullOrEmpty($enc)) { return "$($script:ToastProtocol):focus" }
   return "$($script:ToastProtocol):focus?t=$enc"
