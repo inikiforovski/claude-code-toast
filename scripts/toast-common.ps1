@@ -22,12 +22,83 @@ function ConvertTo-Base64Url {
   return ([Convert]::ToBase64String($b)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 }
 
+function Get-OriginatingTabTitle {
+  # Return THIS session's Windows Terminal tab title (Claude's topic) even when the tab
+  # is inactive or the window is minimized.
+  #
+  # Why not just [Console]::Title? Subprocesses overwrite the console-title buffer:
+  # the Bash tool runs git's bash.exe, which calls SetConsoleTitleW("...\bash.exe"),
+  # so by the time a hook fires [Console]::Title is usually an exe path, not the topic.
+  # Claude sets the *tab* title via an OSC escape (a separate channel) -- that is what
+  # UI Automation reads, and what the click handler must match against.
+  #
+  # Mechanism: momentarily stamp a unique token into our own title (which DOES
+  # propagate through ConPTY to our WT tab regardless of focus/minimize), find which
+  # tab now shows the token via UIA, read that tab's real topic from a pre-stamp
+  # snapshot, then restore the title. Returns '' on any failure so the caller can fall
+  # back to [Console]::Title. Kept ASCII-only (\p{So}/\p{Cf} strip Claude's leading
+  # status glyph without any literal non-ASCII in this file).
+  $orig = ''
+  try { $orig = [Console]::Title } catch {}
+  $restoreTo = $orig
+  $topic = ''
+  try {
+    Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+    Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+    $AE = [System.Windows.Automation.AutomationElement]
+    $TS = [System.Windows.Automation.TreeScope]
+    $winCond = New-Object System.Windows.Automation.PropertyCondition($AE::ClassNameProperty, 'CASCADIA_HOSTING_WINDOW_CLASS')
+    $tabCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::TabItem)
+    $wins = $AE::RootElement.FindAll($TS::Children, $winCond)
+    if ($wins.Count -eq 0) { return '' }
+
+    # Snapshot every tab's RuntimeId -> raw name BEFORE stamping (so we can recover our
+    # tab's real topic once we learn which RuntimeId is ours).
+    $snap = @{}
+    foreach ($w in $wins) {
+      foreach ($tb in $w.FindAll($TS::Descendants, $tabCond)) {
+        $snap[(($tb.GetRuntimeId()) -join '.')] = $tb.Current.Name
+      }
+    }
+    if ($snap.Count -eq 0) { return '' }
+
+    # Re-stamp each iteration: Claude re-asserts its title roughly every 100ms while a
+    # prompt is running, so a single stamp can be reverted before we read it.
+    $token = "CCToastFocus_${PID}_$([DateTime]::UtcNow.Ticks)"
+    $tokCond = New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, $token)
+    $foundRid = $null
+    for ($i = 0; $i -lt 10 -and -not $foundRid; $i++) {
+      try { [Console]::Title = $token } catch {}
+      Start-Sleep -Milliseconds 25
+      foreach ($w in $wins) {
+        $hit = $w.FindFirst($TS::Descendants, $tokCond)
+        if ($hit) { $foundRid = (($hit.GetRuntimeId()) -join '.'); break }
+      }
+    }
+
+    if ($foundRid -and $snap.ContainsKey($foundRid)) {
+      $raw = [string]$snap[$foundRid]
+      $topic = ($raw -replace '^[\s\p{So}\p{Cf}]+', '').Trim()
+      if ($topic) { $restoreTo = $topic }
+    }
+  } catch {
+    $topic = ''
+  } finally {
+    # Never leave our tab showing the token. Restore to the recovered topic (clean) or,
+    # if we never identified it, to whatever the title was before we stamped.
+    try { if ($null -ne $restoreTo) { [Console]::Title = $restoreTo } } catch {}
+  }
+  return $topic
+}
+
 function Get-SessionLaunchUri {
-  # Build a protocol-activation URI carrying the current tab title (Claude's topic)
-  # so the click handler can try to switch to the exact tab. Falls back to a bare
-  # focus verb (raise a Terminal window) when no title is available.
-  $title = ''
-  try { $title = [Console]::Title } catch {}
+  # Build a protocol-activation URI carrying the originating tab title (Claude's topic)
+  # so the click handler can switch to the exact tab. Falls back to [Console]::Title,
+  # then to a bare focus verb (raise a Terminal window) when no title is available.
+  $title = Get-OriginatingTabTitle
+  if ([string]::IsNullOrEmpty($title)) {
+    try { $title = [Console]::Title } catch { $title = '' }
+  }
   $enc = ConvertTo-Base64Url $title
   if ([string]::IsNullOrEmpty($enc)) { return "$($script:ToastProtocol):focus" }
   return "$($script:ToastProtocol):focus?t=$enc"
