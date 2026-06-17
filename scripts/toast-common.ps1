@@ -22,138 +22,55 @@ function ConvertTo-Base64Url {
   return ([Convert]::ToBase64String($b)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 }
 
-function Write-CaptureLog {
-  # Opt-in hook-side diagnostics: only writes when %LOCALAPPDATA%\claude-code-toast\debug
-  # exists (same marker the click handler uses). Off by default for released installs.
-  param([string]$Msg)
-  try {
-    if (-not (Test-Path (Join-Path $script:ToastStableDir 'debug'))) { return }
-    $log = Join-Path $script:ToastStableDir 'hook-capture.log'
-    Add-Content -Path $log -Value ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss.fff'), $Msg) -Encoding UTF8
-  } catch {}
-}
-
-function Set-OwnTabTitleRaw {
-  # Stamp a title into THIS tab using BOTH channels, because which one actually reaches
-  # the Windows Terminal tab depends on how the hook was spawned:
-  #   1) SetConsoleTitle API  -- works when on a direct ConPTY
-  #   2) OSC escape to CONOUT$ -- works through the terminal byte stream (same channel
-  #      Claude itself uses), bypassing a redirected/piped stdout
-  param([string]$Title)
-  try { [Console]::Title = $Title } catch {}
-  try {
-    if (-not ('CCToastConsole' -as [type])) {
-      Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public static class CCToastConsole {
-  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-  public static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr sec, uint d, uint f, IntPtr t);
-  [DllImport("kernel32.dll", SetLastError=true)]
-  public static extern bool WriteFile(IntPtr h, byte[] b, uint n, out uint w, IntPtr o);
-  [DllImport("kernel32.dll", SetLastError=true)]
-  public static extern bool CloseHandle(IntPtr h);
-}
-'@
-    }
-    $h = [CCToastConsole]::CreateFileW('CONOUT$', 0x40000000, 3, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)
-    if ($h -ne [IntPtr]-1 -and $h -ne [IntPtr]::Zero) {
-      $bytes = [System.Text.Encoding]::UTF8.GetBytes("$([char]27)]0;$Title$([char]7)")
-      $w = 0
-      [CCToastConsole]::WriteFile($h, $bytes, [uint32]$bytes.Length, [ref]$w, [IntPtr]::Zero) | Out-Null
-      [CCToastConsole]::CloseHandle($h) | Out-Null
-    }
-  } catch {}
-}
-
-function Get-OriginatingTabTitle {
-  # Return THIS session's Windows Terminal tab title (Claude's topic) even when the tab
-  # is inactive or the window is minimized.
+function Get-SessionLabel {
+  # Build a short, human-readable identifier for THIS Claude session so the toast can
+  # tell the user which tab it belongs to. (We focus only at window level on click -- a
+  # hook spawned under Git Bash can enumerate Terminal tabs via UIA but cannot identify
+  # or switch to its own tab; see README. Naming the tab is the next best thing.)
   #
-  # Why not just [Console]::Title? Subprocesses overwrite the console-title buffer:
-  # the Bash tool runs git's bash.exe, which calls SetConsoleTitleW("...\bash.exe"),
-  # so by the time a hook fires [Console]::Title is usually an exe path, not the topic.
-  # Claude sets the *tab* title via an OSC escape (a separate channel) -- that is what
-  # UI Automation reads, and what the click handler must match against.
-  #
-  # Mechanism: momentarily stamp a unique token into our own title (which propagates to
-  # our WT tab regardless of focus/minimize), find which tab now shows the token via
-  # UIA, read that tab's real topic from a pre-stamp snapshot, then restore the title.
-  # Returns '' on any failure so the caller can fall back to [Console]::Title. ASCII-only
-  # (\p{So}/\p{Cf} strip Claude's leading status glyph without literal non-ASCII here).
-  $orig = ''
-  try { $orig = [Console]::Title } catch {}
-  $restoreTo = $orig
+  # Uses only what the hook can reliably read -- its stdin fields and the transcript
+  # file (file reads work in the hook; only writes to its own Terminal tab do not):
+  #   - folder: basename of cwd (the project)
+  #   - topic : the first real user prompt from the transcript -- what Claude bases the
+  #             tab title on -- with command/caveat wrappers skipped and truncated.
+  param([string]$Cwd, [string]$TranscriptPath)
+
+  $folder = ''
+  if ($Cwd) { try { $folder = Split-Path -Leaf $Cwd } catch {} }
+
   $topic = ''
-  $dWins = 0; $dSnap = 0; $dFound = ''; $dErr = ''
-  try {
-    Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
-    Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
-    $AE = [System.Windows.Automation.AutomationElement]
-    $TS = [System.Windows.Automation.TreeScope]
-    $winCond = New-Object System.Windows.Automation.PropertyCondition($AE::ClassNameProperty, 'CASCADIA_HOSTING_WINDOW_CLASS')
-    $tabCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::TabItem)
-    $wins = $AE::RootElement.FindAll($TS::Children, $winCond)
-    $dWins = $wins.Count
-    if ($wins.Count -gt 0) {
-      # Snapshot every tab's RuntimeId -> raw name BEFORE stamping (so we can recover
-      # our tab's real topic once we learn which RuntimeId is ours).
-      $snap = @{}
-      foreach ($w in $wins) {
-        foreach ($tb in $w.FindAll($TS::Descendants, $tabCond)) {
-          $snap[(($tb.GetRuntimeId()) -join '.')] = $tb.Current.Name
-        }
+  if ($TranscriptPath -and (Test-Path $TranscriptPath)) {
+    try {
+      foreach ($line in (Get-Content -LiteralPath $TranscriptPath -TotalCount 200 -ErrorAction Stop)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $o = $null
+        try { $o = $line | ConvertFrom-Json } catch { continue }
+        if ($o.isMeta -or $o.type -ne 'user' -or -not $o.message -or $o.message.role -ne 'user') { continue }
+        $c = $o.message.content
+        $text = ''
+        if ($c -is [string]) { $text = $c }
+        else { foreach ($part in $c) { if ($part.type -eq 'text' -and $part.text) { $text = [string]$part.text; break } } }
+        $text = $text.Trim()
+        # skip slash-command / local-command wrappers, caveat blocks, and empty turns
+        if (-not $text -or $text -match '^\s*<' -or $text -match '^Caveat:') { continue }
+        $topic = ($text -replace '\s+', ' ').Trim()
+        break
       }
-      $dSnap = $snap.Count
-      if ($snap.Count -gt 0) {
-        # Re-stamp each iteration: Claude re-asserts its title periodically, so a single
-        # stamp can be reverted before we read it.
-        $token = "CCToastFocus_${PID}_$([DateTime]::UtcNow.Ticks)"
-        $tokCond = New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, $token)
-        $foundRid = $null
-        for ($i = 0; $i -lt 12 -and -not $foundRid; $i++) {
-          Set-OwnTabTitleRaw $token
-          Start-Sleep -Milliseconds 30
-          foreach ($w in $wins) {
-            $hit = $w.FindFirst($TS::Descendants, $tokCond)
-            if ($hit) { $foundRid = (($hit.GetRuntimeId()) -join '.'); break }
-          }
-        }
-        $dFound = "$foundRid"
-        if ($foundRid -and $snap.ContainsKey($foundRid)) {
-          $raw = [string]$snap[$foundRid]
-          $topic = ($raw -replace '^[\s\p{So}\p{Cf}]+', '').Trim()
-          if ($topic) { $restoreTo = $topic }
-        }
-      }
-    }
-  } catch {
-    $dErr = $_.Exception.Message
-    $topic = ''
-  } finally {
-    # Never leave our tab showing the token. Restore to the recovered topic (clean) or,
-    # if we never identified it, to whatever the title was before we stamped.
-    try { if ($null -ne $restoreTo) { Set-OwnTabTitleRaw $restoreTo } } catch {}
-    Write-CaptureLog ("capture: psv={0} wins={1} snap={2} found='{3}' topic='{4}' err='{5}'" -f $PSVersionTable.PSVersion, $dWins, $dSnap, $dFound, $topic, $dErr)
+    } catch {}
   }
-  return $topic
+  if ($topic.Length -gt 70) { $topic = $topic.Substring(0, 67) + '...' }
+
+  if ($folder -and $topic) { return "$folder - $topic" }
+  if ($topic) { return $topic }
+  return $folder
 }
 
 function Get-SessionLaunchUri {
-  # Build a protocol-activation URI carrying the originating tab title (Claude's topic)
-  # so the click handler can switch to the exact tab. Falls back to [Console]::Title,
-  # then to a bare focus verb (raise a Terminal window) when no title is available.
-  $consoleBefore = ''
-  try { $consoleBefore = [Console]::Title } catch {}
-  $captured = Get-OriginatingTabTitle
-  $title = $captured
-  if ([string]::IsNullOrEmpty($title)) {
-    try { $title = [Console]::Title } catch { $title = '' }
-  }
-  Write-CaptureLog ("launch: consoleBefore='{0}' captured='{1}' final='{2}'" -f $consoleBefore, $captured, $title)
-  $enc = ConvertTo-Base64Url $title
-  if ([string]::IsNullOrEmpty($enc)) { return "$($script:ToastProtocol):focus" }
-  return "$($script:ToastProtocol):focus?t=$enc"
+  # Window-level focus: clicking the toast raises (and un-minimizes) the most-recently
+  # active Terminal window. We intentionally do NOT carry the tab title -- a hook spawned
+  # under Git Bash can enumerate tabs via UIA but cannot identify or switch to its own
+  # tab (proven; see README), and attempting it added ~1s of latency for no benefit.
+  return "$($script:ToastProtocol):focus"
 }
 
 function Ensure-ToastActivation {

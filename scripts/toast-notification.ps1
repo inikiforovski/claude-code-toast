@@ -28,4 +28,9 @@ Ensure-ToastActivation -ScriptDir $scriptDir
 $line1 = if ($data.notification_type) { "Type: $($data.notification_type)" } else { "Notification" }
 $line2 = if ($data.message) { [string]$data.message } else { "(no message)" }
 
-Show-ClickableToast -Lines @("Claude Code", $line1, $line2) -LaunchUri $launch -IconPath (Get-ToastIconPath -ScriptDir $scriptDir)
+# Name the originating session so the user knows which tab needs attention.
+$label = Get-SessionLabel -Cwd $data.cwd -TranscriptPath $data.transcript_path
+
+$lines = @("Claude Code", $line1, $line2)
+if ($label) { $lines += $label }
+Show-ClickableToast -Lines $lines -LaunchUri $launch -IconPath (Get-ToastIconPath -ScriptDir $scriptDir)

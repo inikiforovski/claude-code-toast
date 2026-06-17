@@ -6,15 +6,16 @@ Windows toast notifications for [Claude Code](https://claude.ai/code) events usi
 > with two changes:
 > 1. It **suppresses `idle_prompt` notifications** — the toast that fires when Claude has been
 >    sitting idle waiting for input. See [What this fork changes](#what-this-fork-changes).
-> 2. Toasts are **clickable** — clicking one raises the Windows Terminal window the session is
->    running in (and switches to its tab when possible). See
+> 2. Toasts are **clickable** — clicking one raises (and un-minimizes) the Windows Terminal
+>    window the session is running in, and each toast **names the session** (project folder +
+>    prompt) so you know which tab to go to. See
 >    [Click a toast to focus its session](#click-a-toast-to-focus-its-session).
 
 ## Features
 
 - **Notification Hook**: Shows a toast notification when Claude Code sends notifications (e.g., asking for input, tool permission requests)
 - **Stop Hook**: Shows a toast when Claude Code finishes responding
-- **Click to focus** *(fork addition)*: Clicking a toast raises the Windows Terminal window the session is running in — and switches to its tab when the tab still shows Claude's title
+- **Click to focus** *(fork addition)*: Clicking a toast raises (and un-minimizes) the Windows Terminal window the session is running in. Each toast also names the originating session (project folder + the prompt that started it) so you can spot the right tab
 
 ## What this fork changes
 
@@ -49,35 +50,44 @@ If you installed locally, reinstall and reload afterward so the change takes eff
 ## Click a toast to focus its session
 
 *(Fork addition.)* In the upstream plugin, clicking a toast does nothing. In this fork,
-clicking a toast brings the **Windows Terminal** window that raised it to the foreground —
-and, when it can identify the exact tab, switches to that tab too.
+clicking a toast brings the **Windows Terminal** window that raised it to the foreground and
+un-minimizes it if needed. Because the click can't reliably switch to the exact *tab* (see
+[Why window-level, not tab-level](#why-window-level-not-tab-level)), each toast **names the
+session** — the project folder and the prompt that started it — so you can pick the right tab
+from the strip.
 
 ### How it works
 
-- Each toast is built with `launch="claudetoast:focus?t=<title>" activationType="protocol"`,
-  where `<title>` is the session's tab title (Claude's conversation topic) captured from
-  `[Console]::Title` at the moment the toast fired.
+- Each toast is built with `launch="claudetoast:focus" activationType="protocol"`.
+- The hook reads its stdin payload (`cwd`, `transcript_path`) to build the session label:
+  the working-directory folder plus the first real user prompt from the transcript (what
+  Claude bases the tab title on), added as an extra line on the toast.
 - The first time a hook runs it registers a `claudetoast:` URL-protocol handler under
   `HKCU\Software\Classes` (current user only, no admin) and copies the click handler
   (`focus-session.ps1`) plus a hidden launcher (`focus-launch.vbs`) to a stable path,
   `%LOCALAPPDATA%\claude-code-toast\`. The stable path is needed because the plugin's cache
   directory changes on every reinstall, but the registry needs a fixed target. The copy is
   hash-gated, so it self-heals across reinstalls and updates.
-- On click, `focus-session.ps1` uses **UI Automation** to find the Terminal tab whose title
-  matches, selects it, and foregrounds its window. It runs via `wscript.exe` +
-  `focus-launch.vbs` so PowerShell starts hidden and no console window flashes.
+- On click, `focus-session.ps1` raises (and restores) the most-recently-active Terminal
+  window. It runs via `wscript.exe` + `focus-launch.vbs` so PowerShell starts hidden and no
+  console window flashes.
+
+### Why window-level, not tab-level
+
+Switching to the *exact* tab isn't reliable, so the fork deliberately focuses at the window
+level. The reason is concrete: Claude Code runs the hooks as `powershell.exe` under Git Bash,
+in a console that is **bridged to — but not the same as** — the tab's real ConPTY. From there
+the hook can enumerate Terminal tabs via UI Automation, but it **cannot identify or switch to
+its own tab**: the only per-tab handle Windows Terminal exposes is the tab *title*, and the
+title the hook can read (`[Console]::Title`) is whatever the last subprocess set it to (often
+`bash.exe`), not Claude's topic — while any title the hook tries to *write* (to stamp/identify
+its tab) never reaches Windows Terminal. Naming the session in the toast is the robust
+alternative.
 
 ### Limitations
 
-Tab-precise targeting has real limits, because the tab title is the only handle Windows
-Terminal exposes to identify a tab:
-
-- **Renamed tabs.** If you manually rename a tab, Terminal stops displaying Claude's title and
-  there is no other identifier to match on. The click then falls back to raising the
-  most-recently-active Terminal window (you pick the tab).
-- **Multiple Terminal windows.** When the title still matches, the right window is found and
-  raised. When it can't (renamed tab), the fallback raises a best-guess window.
-- A single Terminal window holding the session's tab is the case that always works precisely.
+- **Tab selection** is up to you — the click raises the window; the toast text tells you which
+  tab. With one tab per project the folder name alone is usually enough.
 - Only **Windows Terminal** is supported. Other terminals (conhost, VS Code, etc.) aren't —
   the click just raises a Terminal window if one exists.
 
