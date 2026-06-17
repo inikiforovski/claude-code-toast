@@ -33,6 +33,39 @@ function Write-CaptureLog {
   } catch {}
 }
 
+function Set-OwnTabTitleRaw {
+  # Stamp a title into THIS tab using BOTH channels, because which one actually reaches
+  # the Windows Terminal tab depends on how the hook was spawned:
+  #   1) SetConsoleTitle API  -- works when on a direct ConPTY
+  #   2) OSC escape to CONOUT$ -- works through the terminal byte stream (same channel
+  #      Claude itself uses), bypassing a redirected/piped stdout
+  param([string]$Title)
+  try { [Console]::Title = $Title } catch {}
+  try {
+    if (-not ('CCToastConsole' -as [type])) {
+      Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class CCToastConsole {
+  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+  public static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr sec, uint d, uint f, IntPtr t);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool WriteFile(IntPtr h, byte[] b, uint n, out uint w, IntPtr o);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool CloseHandle(IntPtr h);
+}
+'@
+    }
+    $h = [CCToastConsole]::CreateFileW('CONOUT$', 0x40000000, 3, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)
+    if ($h -ne [IntPtr]-1 -and $h -ne [IntPtr]::Zero) {
+      $bytes = [System.Text.Encoding]::UTF8.GetBytes("$([char]27)]0;$Title$([char]7)")
+      $w = 0
+      [CCToastConsole]::WriteFile($h, $bytes, [uint32]$bytes.Length, [ref]$w, [IntPtr]::Zero) | Out-Null
+      [CCToastConsole]::CloseHandle($h) | Out-Null
+    }
+  } catch {}
+}
+
 function Get-OriginatingTabTitle {
   # Return THIS session's Windows Terminal tab title (Claude's topic) even when the tab
   # is inactive or the window is minimized.
@@ -43,16 +76,16 @@ function Get-OriginatingTabTitle {
   # Claude sets the *tab* title via an OSC escape (a separate channel) -- that is what
   # UI Automation reads, and what the click handler must match against.
   #
-  # Mechanism: momentarily stamp a unique token into our own title (which DOES
-  # propagate through ConPTY to our WT tab regardless of focus/minimize), find which
-  # tab now shows the token via UIA, read that tab's real topic from a pre-stamp
-  # snapshot, then restore the title. Returns '' on any failure so the caller can fall
-  # back to [Console]::Title. Kept ASCII-only (\p{So}/\p{Cf} strip Claude's leading
-  # status glyph without any literal non-ASCII in this file).
+  # Mechanism: momentarily stamp a unique token into our own title (which propagates to
+  # our WT tab regardless of focus/minimize), find which tab now shows the token via
+  # UIA, read that tab's real topic from a pre-stamp snapshot, then restore the title.
+  # Returns '' on any failure so the caller can fall back to [Console]::Title. ASCII-only
+  # (\p{So}/\p{Cf} strip Claude's leading status glyph without literal non-ASCII here).
   $orig = ''
   try { $orig = [Console]::Title } catch {}
   $restoreTo = $orig
   $topic = ''
+  $dWins = 0; $dSnap = 0; $dFound = ''; $dErr = ''
   try {
     Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
     Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
@@ -61,43 +94,47 @@ function Get-OriginatingTabTitle {
     $winCond = New-Object System.Windows.Automation.PropertyCondition($AE::ClassNameProperty, 'CASCADIA_HOSTING_WINDOW_CLASS')
     $tabCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::TabItem)
     $wins = $AE::RootElement.FindAll($TS::Children, $winCond)
-    if ($wins.Count -eq 0) { return '' }
-
-    # Snapshot every tab's RuntimeId -> raw name BEFORE stamping (so we can recover our
-    # tab's real topic once we learn which RuntimeId is ours).
-    $snap = @{}
-    foreach ($w in $wins) {
-      foreach ($tb in $w.FindAll($TS::Descendants, $tabCond)) {
-        $snap[(($tb.GetRuntimeId()) -join '.')] = $tb.Current.Name
-      }
-    }
-    if ($snap.Count -eq 0) { return '' }
-
-    # Re-stamp each iteration: Claude re-asserts its title roughly every 100ms while a
-    # prompt is running, so a single stamp can be reverted before we read it.
-    $token = "CCToastFocus_${PID}_$([DateTime]::UtcNow.Ticks)"
-    $tokCond = New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, $token)
-    $foundRid = $null
-    for ($i = 0; $i -lt 10 -and -not $foundRid; $i++) {
-      try { [Console]::Title = $token } catch {}
-      Start-Sleep -Milliseconds 25
+    $dWins = $wins.Count
+    if ($wins.Count -gt 0) {
+      # Snapshot every tab's RuntimeId -> raw name BEFORE stamping (so we can recover
+      # our tab's real topic once we learn which RuntimeId is ours).
+      $snap = @{}
       foreach ($w in $wins) {
-        $hit = $w.FindFirst($TS::Descendants, $tokCond)
-        if ($hit) { $foundRid = (($hit.GetRuntimeId()) -join '.'); break }
+        foreach ($tb in $w.FindAll($TS::Descendants, $tabCond)) {
+          $snap[(($tb.GetRuntimeId()) -join '.')] = $tb.Current.Name
+        }
       }
-    }
-
-    if ($foundRid -and $snap.ContainsKey($foundRid)) {
-      $raw = [string]$snap[$foundRid]
-      $topic = ($raw -replace '^[\s\p{So}\p{Cf}]+', '').Trim()
-      if ($topic) { $restoreTo = $topic }
+      $dSnap = $snap.Count
+      if ($snap.Count -gt 0) {
+        # Re-stamp each iteration: Claude re-asserts its title periodically, so a single
+        # stamp can be reverted before we read it.
+        $token = "CCToastFocus_${PID}_$([DateTime]::UtcNow.Ticks)"
+        $tokCond = New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, $token)
+        $foundRid = $null
+        for ($i = 0; $i -lt 12 -and -not $foundRid; $i++) {
+          Set-OwnTabTitleRaw $token
+          Start-Sleep -Milliseconds 30
+          foreach ($w in $wins) {
+            $hit = $w.FindFirst($TS::Descendants, $tokCond)
+            if ($hit) { $foundRid = (($hit.GetRuntimeId()) -join '.'); break }
+          }
+        }
+        $dFound = "$foundRid"
+        if ($foundRid -and $snap.ContainsKey($foundRid)) {
+          $raw = [string]$snap[$foundRid]
+          $topic = ($raw -replace '^[\s\p{So}\p{Cf}]+', '').Trim()
+          if ($topic) { $restoreTo = $topic }
+        }
+      }
     }
   } catch {
+    $dErr = $_.Exception.Message
     $topic = ''
   } finally {
     # Never leave our tab showing the token. Restore to the recovered topic (clean) or,
     # if we never identified it, to whatever the title was before we stamped.
-    try { if ($null -ne $restoreTo) { [Console]::Title = $restoreTo } } catch {}
+    try { if ($null -ne $restoreTo) { Set-OwnTabTitleRaw $restoreTo } } catch {}
+    Write-CaptureLog ("capture: psv={0} wins={1} snap={2} found='{3}' topic='{4}' err='{5}'" -f $PSVersionTable.PSVersion, $dWins, $dSnap, $dFound, $topic, $dErr)
   }
   return $topic
 }
