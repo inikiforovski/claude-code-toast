@@ -25,12 +25,15 @@ Ensure-ToastActivation -ScriptDir $scriptDir
 
 # Claude Code Notification input includes `message` and usually `notification_type`
 # https://code.claude.com/docs/en/hooks (Notification Input)
-$line1 = if ($data.notification_type) { "Type: $($data.notification_type)" } else { "Notification" }
-$line2 = if ($data.message) { [string]$data.message } else { "(no message)" }
+$message = if ($data.message) { [string]$data.message } else { "(no message)" }
 
 # Name the originating session so the user knows which tab needs attention.
 $label = Get-SessionLabel -Cwd $data.cwd -TranscriptPath $data.transcript_path
 
-$lines = @("Claude Code", $line1, $line2)
+# Keep to 3 text lines total (title + 2 body): the Windows toast popup only renders
+# three lines, so a 4th was silently dropped -- which is why the session label never
+# showed here even though the Stop toast (also 3 lines) shows it. The `message` already
+# conveys what the old "Type: ..." line did, so we drop it to make room for the label.
+$lines = @("Claude Code", $message)
 if ($label) { $lines += $label }
 Show-ClickableToast -Lines $lines -LaunchUri $launch -IconPath (Get-ToastIconPath -ScriptDir $scriptDir)
