@@ -1,5 +1,25 @@
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "wscript.exe \"${CLAUDE_PLUGIN_ROOT}/scripts/capture-launch.vbs\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "wscript.exe \"${CLAUDE_PLUGIN_ROOT}/scripts/capture-launch.vbs\""
+          }
+        ]
+      }
+    ],
     "Notification": [
       {
         "hooks": [

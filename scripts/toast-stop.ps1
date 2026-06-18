@@ -9,8 +9,10 @@ if (-not [string]::IsNullOrWhiteSpace($raw)) { try { $data = $raw | ConvertFrom-
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $scriptDir 'toast-common.ps1')
 
-# Ensure the claudetoast: handler exists; clicking the toast raises the Terminal window.
-$launch = Get-SessionLaunchUri
+# Build the launch URI (targeting this session's window, if the capture hook recorded it)
+# and ensure the claudetoast: handler exists; clicking the toast raises that Terminal window.
+$hwnd = Get-SessionWindowHwnd -SessionId $data.session_id
+$launch = Get-SessionLaunchUri -Hwnd $hwnd
 Ensure-ToastActivation -ScriptDir $scriptDir
 
 # Name the originating session so the user knows which tab finished.

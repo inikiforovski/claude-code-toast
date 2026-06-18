@@ -1,6 +1,11 @@
 # focus-session.ps1
 # Protocol handler for the claudetoast: URL scheme, invoked when a toast is clicked.
-# Raises (and un-minimizes) the most-recently-active Windows Terminal window.
+# Raises (and un-minimizes) the Windows Terminal window that hosts the originating session.
+#
+# The toast's URI carries that window's HWND ("claudetoast:focus?hwnd=12345"), captured
+# while the session was foregrounded (see capture-window.ps1). We raise that exact window,
+# so the correct window comes up even with several Terminal windows open. If the HWND is
+# missing or stale (window closed since), we fall back to the most-recently-active Terminal.
 #
 # Window-level only by design: a hook spawned under Git Bash can enumerate Terminal
 # tabs via UI Automation but cannot identify or switch to its own tab (the console
@@ -24,6 +29,7 @@ public static class WinFocus {
   [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
   [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int n);
   [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -62,10 +68,30 @@ public static class WinFocus {
     }, IntPtr.Zero);
     return list;
   }
+
+  public static bool IsClass(IntPtr h, string cls) {
+    if (h == IntPtr.Zero || !IsWindow(h)) return false;
+    var sb = new StringBuilder(256);
+    GetClassName(h, sb, sb.Capacity);
+    return sb.ToString() == cls;
+  }
 }
 '@
 
-# EnumWindows returns top-of-Z-order first, i.e. the most recently active window.
-$wt = [WinFocus]::ByClass($WT_CLASS)
-if ($wt.Count -gt 0) { [WinFocus]::Force($wt[0]) }
+# Prefer the exact window the toast carries (the session's own window). Parse hwnd=<n>
+# from the URI and focus it only if it still exists and is a Terminal window.
+$target = [IntPtr]::Zero
+if ($Uri -and $Uri -match 'hwnd=(\d+)') {
+  $h = [IntPtr][long]$Matches[1]
+  if ([WinFocus]::IsClass($h, $WT_CLASS)) { $target = $h }
+}
+
+if ($target -ne [IntPtr]::Zero) {
+  [WinFocus]::Force($target)
+} else {
+  # Fallback: no/stale HWND -> most-recently-active Terminal window.
+  # EnumWindows returns top-of-Z-order first, i.e. the most recently active window.
+  $wt = [WinFocus]::ByClass($WT_CLASS)
+  if ($wt.Count -gt 0) { [WinFocus]::Force($wt[0]) }
+}
 exit 0

@@ -5,6 +5,7 @@
 $script:ToastAppId    = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
 $script:ToastProtocol = 'claudetoast'
 $script:ToastStableDir = Join-Path $env:LOCALAPPDATA 'claude-code-toast'
+$script:ToastSessionDir = Join-Path $script:ToastStableDir 'sessions'
 
 function Escape-Xml($text) {
   return [System.Security.SecurityElement]::Escape([string]$text)
@@ -65,11 +66,60 @@ function Get-SessionLabel {
   return $folder
 }
 
+function Get-SessionStoreKey {
+  # Stable per-session key shared by the capture hook (which records the window) and the
+  # toast hooks (which read it back). WT_SESSION is a per-pane GUID inherited by every hook
+  # of the same Terminal session -- ideal. Fall back to Claude's session_id when WT_SESSION
+  # is absent (e.g. a non-Windows-Terminal host, where there's no WT window to focus anyway).
+  param([string]$SessionId)
+  $key = $env:WT_SESSION
+  if ([string]::IsNullOrWhiteSpace($key)) { $key = $SessionId }
+  if ([string]::IsNullOrWhiteSpace($key)) { return '' }
+  return ($key -replace '[^A-Za-z0-9_.-]', '_')
+}
+
+function Save-SessionWindowHwnd {
+  # Persist the window HWND that hosts this session, keyed by Get-SessionStoreKey. One tiny
+  # file per session (race-free: concurrent sessions write distinct files). The capture hook
+  # runs detached (no stdin), so SessionId is usually omitted -- the WT_SESSION env key is
+  # what both sides agree on.
+  param([long]$Hwnd, [string]$SessionId = '')
+  $key = Get-SessionStoreKey -SessionId $SessionId
+  if (-not $key -or $Hwnd -eq 0) { return }
+  try {
+    if (-not (Test-Path $script:ToastSessionDir)) {
+      New-Item -ItemType Directory -Path $script:ToastSessionDir -Force | Out-Null
+    }
+    Set-Content -LiteralPath (Join-Path $script:ToastSessionDir "$key.txt") -Value ([string]$Hwnd) -Encoding ASCII
+  } catch {}
+}
+
+function Get-SessionWindowHwnd {
+  # Read back the HWND recorded by the capture hook for this session, or 0 if none.
+  param([string]$SessionId)
+  $key = Get-SessionStoreKey -SessionId $SessionId
+  if (-not $key) { return 0 }
+  $f = Join-Path $script:ToastSessionDir "$key.txt"
+  if (-not (Test-Path $f)) { return 0 }
+  try {
+    $v = (Get-Content -LiteralPath $f -TotalCount 1 -ErrorAction Stop).Trim()
+    $n = [long]0
+    if ([long]::TryParse($v, [ref]$n)) { return $n }
+  } catch {}
+  return 0
+}
+
 function Get-SessionLaunchUri {
-  # Window-level focus: clicking the toast raises (and un-minimizes) the most-recently
-  # active Terminal window. We intentionally do NOT carry the tab title -- a hook spawned
-  # under Git Bash can enumerate tabs via UIA but cannot identify or switch to its own
-  # tab (proven; see README), and attempting it added ~1s of latency for no benefit.
+  # Clicking the toast raises the Terminal *window* that hosts this session. When the
+  # capture hook (UserPromptSubmit/SessionStart) recorded that window's HWND, we carry it
+  # so the click targets the exact window even with several Terminal windows open. Without
+  # it (no capture yet, or a non-WT host) we fall back to the most-recently-active window.
+  #
+  # Tab-level focus is still out of scope: a hook spawned under Git Bash can enumerate tabs
+  # via UIA but cannot identify or switch to its own tab (see README). The toast names the
+  # session so the user can pick the right tab once the window is up.
+  param([long]$Hwnd = 0)
+  if ($Hwnd -ne 0) { return "$($script:ToastProtocol):focus?hwnd=$Hwnd" }
   return "$($script:ToastProtocol):focus"
 }
 

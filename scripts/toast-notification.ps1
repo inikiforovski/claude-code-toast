@@ -19,8 +19,10 @@ if ($data.notification_type -and $suppressedTypes -contains $data.notification_t
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $scriptDir 'toast-common.ps1')
 
-# Capture the launch URI (current tab title) and ensure the claudetoast: handler exists.
-$launch = Get-SessionLaunchUri
+# Build the launch URI (targeting this session's window, if the capture hook recorded it)
+# and ensure the claudetoast: handler exists.
+$hwnd = Get-SessionWindowHwnd -SessionId $data.session_id
+$launch = Get-SessionLaunchUri -Hwnd $hwnd
 Ensure-ToastActivation -ScriptDir $scriptDir
 
 # Claude Code Notification input includes `message` and usually `notification_type`
