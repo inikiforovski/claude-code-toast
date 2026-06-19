@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "wscript.exe \"${CLAUDE_PLUGIN_ROOT}/scripts/capture-launch.vbs\""
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"${CLAUDE_PLUGIN_ROOT}/scripts/capture-window.ps1\""
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "wscript.exe \"${CLAUDE_PLUGIN_ROOT}/scripts/capture-launch.vbs\""
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"${CLAUDE_PLUGIN_ROOT}/scripts/capture-window.ps1\""
           }
         ]
       }

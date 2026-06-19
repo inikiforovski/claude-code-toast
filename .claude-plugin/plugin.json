@@ -1,7 +1,7 @@
 {
   "name": "toast-notifications",
   "description": "Windows toast notifications for Claude Code events using native Windows APIs",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": {
     "name": "TianqiZhang"
   }

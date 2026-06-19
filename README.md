@@ -59,13 +59,18 @@ from the strip.
 
 ### How it works
 
-- **Capture (the key bit):** a `UserPromptSubmit` and a `SessionStart` hook fire a tiny,
-  detached helper (`capture-launch.vbs` → `capture-window.ps1`) that records the **foreground
-  window's HWND** — keyed by the session's `WT_SESSION` GUID — into
-  `%LOCALAPPDATA%\claude-code-toast\sessions\`. Those two moments are exactly when you're
-  looking at *this* session's window, so the foreground window is reliably the right one. The
-  helper launches via `wscript.exe` and returns in ~30 ms, so it adds no perceptible latency
-  to prompt submission.
+- **Capture (the key bit):** a `UserPromptSubmit` and a `SessionStart` hook run
+  `capture-window.ps1`, which records the **foreground window's HWND** — keyed by the session's
+  `WT_SESSION` GUID — into `%LOCALAPPDATA%\claude-code-toast\sessions\`. Those two moments are
+  exactly when you're looking at *this* session's window, so the foreground window is reliably
+  the right one. The capture runs **synchronously** (Claude waits on it) on purpose: an earlier
+  version launched it detached for speed, but a detached helper doesn't read the foreground
+  until the OS schedules it — often most of a second later, while Claude is busy starting the
+  turn — by which point you may have switched to *another* Terminal window, so it recorded the
+  wrong one. Running inline reads the foreground within ~one PowerShell startup of submit, while
+  you're still on this window. To keep that fast it declares its Win32 calls with reflection
+  emit (`DefinePInvokeMethod`) instead of `Add-Type`, skipping the C# compiler (~40 ms vs
+  ~300 ms in-process).
 - Each toast is built with `launch="claudetoast:focus?hwnd=<n>" activationType="protocol"`,
   where `<n>` is the captured HWND for the session that raised it. The hook also reads its
   stdin payload (`cwd`, `transcript_path`) to add a **session label** (project folder + the
@@ -207,11 +212,11 @@ claude-code-toast/
 ├── hooks/
 │   └── hooks.json              # Hook configuration
 ├── scripts/
-│   ├── toast-common.ps1        # Shared helpers: activation install, session-window store, toast rendering
+│   ├── session-store.ps1       # Per-session window-HWND store, shared by the capture & toast hooks
+│   ├── toast-common.ps1        # Shared helpers: activation install, toast rendering (dot-sources session-store)
 │   ├── toast-notification.ps1  # Notification handler (suppresses idle_prompt)
 │   ├── toast-stop.ps1          # Stop event handler
 │   ├── capture-window.ps1      # Records this session's foreground Terminal window (keyed by WT_SESSION)
-│   ├── capture-launch.vbs      # Hidden, non-blocking launcher for capture-window.ps1
 │   ├── focus-session.ps1       # Click handler: focus the originating Terminal window
 │   └── focus-launch.vbs        # Hidden launcher for focus-session.ps1 (no console flash)
 ├── LICENSE
